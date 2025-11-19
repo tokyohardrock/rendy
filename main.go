@@ -25,11 +25,6 @@ type face struct {
 	vn int
 }
 
-type vertices2D struct {
-	x []int
-	y []int
-}
-
 var vrtcs vertices3D = vertices3D{
 	x: []float64{-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0},
 	y: []float64{-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0},
@@ -79,7 +74,7 @@ func normalizeAndCenter(vrt *vertices3D) {
 	cx /= float64(len(vrt.x))
 	cy /= float64(len(vrt.y))
 	cz /= float64(len(vrt.z))
-	scale := 1 / maxElem
+	var scale = 1 / maxElem
 	for i := range vrt.x {
 		vrt.x[i] = (vrt.x[i] - cx) * scale
 		vrt.y[i] = (vrt.y[i] - cy) * scale
@@ -88,7 +83,7 @@ func normalizeAndCenter(vrt *vertices3D) {
 }
 
 func getTransformedCoords(x, y, z float64) (float64, float64, float64) {
-	var coordsMatrix = [][]float64{
+	var vertexMatrix = [][]float64{
 		{x},
 		{y},
 		{z},
@@ -96,8 +91,8 @@ func getTransformedCoords(x, y, z float64) (float64, float64, float64) {
 	var xRot = xRotationMatrix(xyzRotations[0])
 	var yRot = yRotationMatrix(xyzRotations[1])
 	var zRot = zRotationMatrix(xyzRotations[2])
-	var resultTransformMatrix = mulitplyMatrices(mulitplyMatrices(xRot, yRot), zRot)
-	var result = mulitplyMatrices(resultTransformMatrix, coordsMatrix)
+	var transformMatrix = mulitplyMatrices(mulitplyMatrices(xRot, yRot), zRot)
+	var result = mulitplyMatrices(transformMatrix, vertexMatrix)
 	return result[0][0], result[1][0], result[2][0]
 }
 
@@ -109,39 +104,67 @@ func getScreenCoord(x, y, z float64) (float64, float64) {
 	return scrnX, scrnY
 }
 
-func scanlineFilling(coords vertices2D) vertices2D {
-	var filling vertices2D = vertices2D{
-		x: make([]int, 0, 5),
-		y: make([]int, 0, 5),
+func findDepth(coords vertices3D, vrtX, vrtY, faceArea float64) float64 {
+	var s1 = math.Abs((vrtX-coords.x[1])*(coords.y[2]-coords.y[1])-(coords.x[2]-coords.x[1])*(vrtY-coords.y[1])) * 0.5
+	var s2 = math.Abs((vrtX-coords.x[2])*(coords.y[0]-coords.y[2])-(coords.x[0]-coords.x[2])*(vrtY-coords.y[2])) * 0.5
+	var a = s1 / faceArea
+	var b = s2 / faceArea
+	var c = 1 - a - b
+	return a*(1/coords.z[0]) + b*(1/coords.z[1]) + c*(1/coords.z[2])
+}
+
+func scanlineFilling(coords vertices3D) vertices3D {
+	if len(coords.x) < 3 {
+		log.Println("Invalid face - must be at least 3 vertices")
+		return vertices3D{}
+	}
+	var faceArea = math.Abs((coords.x[1]-coords.x[0])*(coords.y[2]-coords.y[0])-(coords.x[2]-coords.x[0])*(coords.y[1]-coords.y[0])) * 0.5
+	if faceArea == 0 {
+		return vertices3D{}
+	}
+	var filling vertices3D = vertices3D{
+		x: make([]float64, 0, 5),
+		y: make([]float64, 0, 5),
+		z: make([]float64, 0, 5),
 	}
 	for i := 0; i < len(coords.y)-1; i++ {
 		for j := 0; j < len(coords.y)-1-i; j++ {
 			if coords.y[j] > coords.y[j+1] {
 				coords.x[j], coords.x[j+1] = coords.x[j+1], coords.x[j]
 				coords.y[j], coords.y[j+1] = coords.y[j+1], coords.y[j]
+				coords.z[j], coords.z[j+1] = coords.z[j+1], coords.z[j]
 			}
 		}
 	}
-	for y := coords.y[0]; y < coords.y[1]; y++ {
-		if coords.y[1] == coords.y[0] || coords.y[2] == coords.y[0] {
+	var startY = int(math.Max(0, math.Ceil(coords.y[0])))
+	var midY = int(math.Min(gridH-1, math.Ceil(coords.y[1])))
+	var endY = int(math.Min(gridH-1, math.Ceil(coords.y[2])))
+	for y := startY; y < midY; y++ {
+		if coords.y[2] == coords.y[0] {
 			continue
 		}
-		var lim1 int = coords.x[0] + (y-coords.y[0])*(coords.x[1]-coords.x[0])/(coords.y[1]-coords.y[0])
-		var lim2 int = coords.x[0] + (y-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
-		for x := min(lim1, lim2); x <= max(lim1, lim2); x++ {
-			filling.x = append(filling.x, x)
-			filling.y = append(filling.y, y)
+		var lim1 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[1]-coords.x[0])/(coords.y[1]-coords.y[0])
+		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
+		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
+		var endX = int(math.Min(float64(gridW-1), math.Floor(max(lim1, lim2))))
+		for x := startX; x <= endX; x++ {
+			filling.x = append(filling.x, float64(x))
+			filling.y = append(filling.y, float64(y))
+			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), faceArea))
 		}
 	}
-	for y := coords.y[1]; y <= coords.y[2]; y++ {
-		if coords.y[2] == coords.y[1] || coords.y[2] == coords.y[0] {
+	for y := midY; y < endY; y++ {
+		if coords.y[1] == coords.y[0] {
 			continue
 		}
-		var lim1 int = coords.x[1] + (y-coords.y[1])*(coords.x[2]-coords.x[1])/(coords.y[2]-coords.y[1])
-		var lim2 int = coords.x[0] + (y-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
-		for x := min(lim1, lim2); x <= max(lim1, lim2); x++ {
-			filling.x = append(filling.x, x)
-			filling.y = append(filling.y, y)
+		var lim1 = coords.x[1] + (float64(y)-coords.y[1])*(coords.x[2]-coords.x[1])/(coords.y[2]-coords.y[1])
+		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
+		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
+		var endX = int(math.Min(float64(gridW-1), math.Floor(max(lim1, lim2))))
+		for x := startX; x <= endX; x++ {
+			filling.x = append(filling.x, float64(x))
+			filling.y = append(filling.y, float64(y))
+			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), faceArea))
 		}
 	}
 	return filling
@@ -149,30 +172,44 @@ func scanlineFilling(coords vertices2D) vertices2D {
 
 func draw() {
 	var grid = make([][]int, gridH)
-	var projCoords vertices2D = vertices2D{
-		make([]int, len(vrtcs.x)),
-		make([]int, len(vrtcs.y)),
+	var zBuffer = make([][]float64, gridH)
+	var projCoords vertices3D = vertices3D{
+		x: make([]float64, len(vrtcs.x)),
+		y: make([]float64, len(vrtcs.y)),
+		z: make([]float64, len(vrtcs.z)),
 	}
 	for i := range grid {
 		grid[i] = make([]int, gridW)
+		zBuffer[i] = make([]float64, gridW)
+		for j := range zBuffer[i] {
+			zBuffer[i][j] = math.Inf(1)
+		}
 	}
 	for i := range vrtcs.x {
-		scrnX, scrnY := getScreenCoord(getTransformedCoords(vrtcs.x[i], vrtcs.y[i], vrtcs.z[i]))
-		projCoords.x[i] = int(scrnX)
-		projCoords.y[i] = int(scrnY)
+		var tX, tY, tZ = getTransformedCoords(vrtcs.x[i], vrtcs.y[i], vrtcs.z[i])
+		var scrnX, scrnY = getScreenCoord(tX, tY, tZ)
+		projCoords.x[i] = scrnX
+		projCoords.y[i] = scrnY
+		projCoords.z[i] = tZ + d
 	}
 	for i := range faces {
-		var currFace vertices2D = vertices2D{
-			x: make([]int, 0, len(faces[i].v)),
-			y: make([]int, 0, len(faces[i].v)),
+		var currFace vertices3D = vertices3D{
+			x: make([]float64, 0, len(faces[i].v)),
+			y: make([]float64, 0, len(faces[i].v)),
+			z: make([]float64, 0, len(faces[i].v)),
 		}
 		for j := range faces[i].v {
-			currFace.x = append(currFace.x, projCoords.x[faces[i].v[j]-1])
-			currFace.y = append(currFace.y, projCoords.y[faces[i].v[j]-1])
+			var index = faces[i].v[j] - 1
+			currFace.x = append(currFace.x, projCoords.x[index])
+			currFace.y = append(currFace.y, projCoords.y[index])
+			currFace.z = append(currFace.z, projCoords.z[index])
 		}
 		var filling = scanlineFilling(currFace)
 		for j := range filling.x {
-			grid[filling.y[j]][filling.x[j]] = 1
+			if zBuffer[int(filling.y[j])][int(filling.x[j])] > filling.z[j] {
+				grid[int(filling.y[j])][int(filling.x[j])] = 1
+				zBuffer[int(filling.y[j])][int(filling.x[j])] = filling.z[j]
+			}
 		}
 	}
 	for i := range grid {
