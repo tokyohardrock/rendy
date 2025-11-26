@@ -8,14 +8,14 @@ import (
 )
 
 const (
-	d     = 3  // camera Z-coordinate
-	gridW = 40 // grid width
-	gridH = 40 // grid height
+	d     = 2.5 // camera Z-coordinate
+	gridW = 40  // grid width
+	gridH = 40  // grid height
 	fps   = 16
 	delta = math.Pi * 0.01
 )
 
-var backedLight = false
+var backedLight = true
 
 type points struct {
 	x []float64
@@ -62,7 +62,7 @@ var faces []face = []face{
 
 var xyzRotations = []float64{0, 0, 0}
 
-var light = []float64{1, 1, 0}
+var light = []float64{0, 0, 1}
 
 var cameraDir = []float64{0, 0, -1}
 
@@ -117,13 +117,12 @@ func getScreenCoord(x, y, z float64) (float64, float64) {
 	return scrnX, scrnY
 }
 
-func findDepth(coords points, vrtX, vrtY, faceArea float64) float64 {
-	var s1 = math.Abs((vrtX-coords.x[1])*(coords.y[2]-coords.y[1])-(coords.x[2]-coords.x[1])*(vrtY-coords.y[1])) * 0.5
-	var s2 = math.Abs((vrtX-coords.x[2])*(coords.y[0]-coords.y[2])-(coords.x[0]-coords.x[2])*(vrtY-coords.y[2])) * 0.5
-	var a = s1 / faceArea
-	var b = s2 / faceArea
-	var c = 1 - a - b
-	return a*(1/coords.z[0]) + b*(1/coords.z[1]) + c*(1/coords.z[2])
+func findDepth(coords points, vrtX, vrtY, det float64) float64 {
+	var l1 = ((coords.y[1]-coords.y[2])*(vrtX-coords.x[2]) + (coords.x[2]-coords.x[1])*(vrtY-coords.y[2])) / det
+	var l2 = ((coords.y[2]-coords.y[0])*(vrtX-coords.x[2]) + (coords.x[0]-coords.x[2])*(vrtY-coords.y[2])) / det
+	var l3 = 1 - l1 - l2
+	var inv = l1/(coords.z[0]+d) + l2/(coords.z[1]+d) + l3/(coords.z[2]+d)
+	return 1/inv - d
 }
 
 func scanlineFilling(coords points) points {
@@ -131,24 +130,26 @@ func scanlineFilling(coords points) points {
 		log.Println("Invalid face - must be at least 3 vertices")
 		return points{}
 	}
-	var faceArea = math.Abs((coords.x[1]-coords.x[0])*(coords.y[2]-coords.y[0])-(coords.x[2]-coords.x[0])*(coords.y[1]-coords.y[0])) * 0.5
-	if faceArea == 0 {
-		return points{}
-	}
 	var filling points = points{
 		x: make([]float64, 0, 5),
 		y: make([]float64, 0, 5),
 		z: make([]float64, 0, 5),
 	}
-	for i := 0; i < len(coords.y)-1; i++ {
-		for j := 0; j < len(coords.y)-1-i; j++ {
-			if coords.y[j] > coords.y[j+1] {
-				coords.x[j], coords.x[j+1] = coords.x[j+1], coords.x[j]
-				coords.y[j], coords.y[j+1] = coords.y[j+1], coords.y[j]
-				coords.z[j], coords.z[j+1] = coords.z[j+1], coords.z[j]
-			}
-		}
+	var swap = func(i1, i2 int) {
+		coords.x[i1], coords.x[i2] = coords.x[i2], coords.x[i1]
+		coords.y[i1], coords.y[i2] = coords.y[i2], coords.y[i1]
+		coords.z[i1], coords.z[i2] = coords.z[i2], coords.z[i1]
 	}
+	if coords.y[0] > coords.y[1] {
+		swap(0, 1)
+	}
+	if coords.y[1] > coords.y[2] {
+		swap(1, 2)
+	}
+	if coords.y[0] > coords.y[1] {
+		swap(0, 1)
+	}
+	var det = (coords.y[1]-coords.y[2])*(coords.x[0]-coords.x[2]) + (coords.x[2]-coords.x[1])*(coords.y[0]-coords.y[2])
 	var startY = int(math.Max(0, math.Ceil(coords.y[0])))
 	var midY = int(math.Min(gridH-1, math.Ceil(coords.y[1])))
 	var endY = int(math.Min(gridH-1, math.Ceil(coords.y[2])))
@@ -160,7 +161,7 @@ func scanlineFilling(coords points) points {
 		for x := startX; x <= endX; x++ {
 			filling.x = append(filling.x, float64(x))
 			filling.y = append(filling.y, float64(y))
-			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), faceArea))
+			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), det))
 		}
 	}
 	for y := midY; y < endY; y++ {
@@ -171,7 +172,7 @@ func scanlineFilling(coords points) points {
 		for x := startX; x <= endX; x++ {
 			filling.x = append(filling.x, float64(x))
 			filling.y = append(filling.y, float64(y))
-			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), faceArea))
+			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), det))
 		}
 	}
 	return filling
@@ -184,7 +185,7 @@ func backfaceCulling(x, y, z float64) bool {
 func faceBrightness(x, y, z float64) int {
 	var brightness = x*light[0] + y*light[1] + z*light[2]
 	brightness = ((brightness + 3) / 6) * float64(len(ascii))
-	return int(brightness)
+	return int(brightness) + 2
 }
 
 func draw() {
