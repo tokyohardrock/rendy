@@ -4,18 +4,21 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sync"
 	"time"
 )
 
 const (
-	d     = 2.5 // camera Z-coordinate
-	gridW = 40  // grid width
-	gridH = 40  // grid height
-	fps   = 16
-	delta = math.Pi * 0.01
+	d          = 2.5 // camera Z-coordinate
+	gridWidth  = 40  // grid width
+	gridHeight = 40  // grid height
+	fps        = 16
+	delta      = math.Pi * 0.01
 )
 
 var backedLight = true
+
+var maxGoroutines = 50_000
 
 type points struct {
 	x []float64
@@ -112,8 +115,8 @@ func getTransformedCoords(x, y, z float64) (float64, float64, float64) {
 func getScreenCoord(x, y, z float64) (float64, float64) {
 	var x_proj = x / (z + d)
 	var y_proj = y / (z + d)
-	var scrnX = (x_proj + 1) * (gridW - 1) * 0.5
-	var scrnY = (1 - y_proj) * (gridH - 1) * 0.5
+	var scrnX = (x_proj + 1) * (gridWidth - 1) * 0.5
+	var scrnY = (1 - y_proj) * (gridHeight - 1) * 0.5
 	return scrnX, scrnY
 }
 
@@ -121,11 +124,11 @@ func findDepth(coords points, vrtX, vrtY, det float64) float64 {
 	var l1 = ((coords.y[1]-coords.y[2])*(vrtX-coords.x[2]) + (coords.x[2]-coords.x[1])*(vrtY-coords.y[2])) / det
 	var l2 = ((coords.y[2]-coords.y[0])*(vrtX-coords.x[2]) + (coords.x[0]-coords.x[2])*(vrtY-coords.y[2])) / det
 	var l3 = 1 - l1 - l2
-	var inv = l1/(coords.z[0]+d) + l2/(coords.z[1]+d) + l3/(coords.z[2]+d)
-	return 1/inv - d
+	var inv = l1/(coords.z[0]) + l2/(coords.z[1]) + l3/(coords.z[2])
+	return 1 / inv
 }
 
-func scanlineFilling(coords points) points {
+func fillFace(coords points) points {
 	if len(coords.x) < 3 {
 		log.Println("Invalid face - must be at least 3 vertices")
 		return points{}
@@ -151,13 +154,13 @@ func scanlineFilling(coords points) points {
 	}
 	var det = (coords.y[1]-coords.y[2])*(coords.x[0]-coords.x[2]) + (coords.x[2]-coords.x[1])*(coords.y[0]-coords.y[2])
 	var startY = int(math.Max(0, math.Ceil(coords.y[0])))
-	var midY = int(math.Min(gridH-1, math.Ceil(coords.y[1])))
-	var endY = int(math.Min(gridH-1, math.Ceil(coords.y[2])))
+	var midY = int(math.Min(gridHeight-1, math.Ceil(coords.y[1])))
+	var endY = int(math.Min(gridHeight-1, math.Ceil(coords.y[2])))
 	for y := startY; y < midY; y++ {
 		var lim1 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[1]-coords.x[0])/(coords.y[1]-coords.y[0])
 		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
-		var endX = int(math.Min(float64(gridW-1), math.Floor(max(lim1, lim2))))
+		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
 			filling.x = append(filling.x, float64(x))
 			filling.y = append(filling.y, float64(y))
@@ -168,7 +171,7 @@ func scanlineFilling(coords points) points {
 		var lim1 = coords.x[1] + (float64(y)-coords.y[1])*(coords.x[2]-coords.x[1])/(coords.y[2]-coords.y[1])
 		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
-		var endX = int(math.Min(float64(gridW-1), math.Floor(max(lim1, lim2))))
+		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
 			filling.x = append(filling.x, float64(x))
 			filling.y = append(filling.y, float64(y))
@@ -178,20 +181,23 @@ func scanlineFilling(coords points) points {
 	return filling
 }
 
-func backfaceCulling(x, y, z float64) bool {
+func cull(x, y, z float64) bool {
 	return (cameraDir[0]*x + cameraDir[1]*y + cameraDir[2]*z) <= 0
 }
 
-func faceBrightness(x, y, z float64) int {
+func getShade(x, y, z float64) int {
 	var brightness = x*light[0] + y*light[1] + z*light[2]
 	brightness = ((brightness + 3) / 6) * float64(len(ascii))
 	return int(brightness) + 2
 }
 
 func draw() {
-	var now = time.Now()
-	var grid = make([][]int, gridH)
-	var zBuffer = make([][]float64, gridH)
+	var startTime = time.Now()
+	var grid = make([][]int, gridHeight)
+	var zBuff = make([][]float64, gridHeight)
+	var wg = sync.WaitGroup{}
+	var mut = sync.Mutex{}
+	var sem = make(chan struct{}, maxGoroutines)
 	var projCoords = points{
 		x: make([]float64, len(vrtcs.x)),
 		y: make([]float64, len(vrtcs.y)),
@@ -203,61 +209,98 @@ func draw() {
 		z: make([]float64, len(normals.z)),
 	}
 	for i := range grid {
-		grid[i] = make([]int, gridW)
-		zBuffer[i] = make([]float64, gridW)
-		for j := range zBuffer[i] {
-			zBuffer[i][j] = math.Inf(1)
+		grid[i] = make([]int, gridWidth)
+		zBuff[i] = make([]float64, gridWidth)
+		for j := range zBuff[i] {
+			zBuff[i][j] = math.Inf(1)
 		}
 	}
 	for i := range vrtcs.x {
-		var tX, tY, tZ = getTransformedCoords(vrtcs.x[i], vrtcs.y[i], vrtcs.z[i])
-		var scrnX, scrnY = getScreenCoord(tX, tY, tZ)
-		projCoords.x[i] = scrnX
-		projCoords.y[i] = scrnY
-		projCoords.z[i] = tZ + d
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+			var tX, tY, tZ = getTransformedCoords(vrtcs.x[i], vrtcs.y[i], vrtcs.z[i])
+			var scrnX, scrnY = getScreenCoord(tX, tY, tZ)
+			projCoords.x[i] = scrnX
+			projCoords.y[i] = scrnY
+			projCoords.z[i] = tZ + d
+		}(i)
 	}
+	wg.Wait()
 	for i := range normals.x {
-		tNormals.x[i], tNormals.y[i], tNormals.z[i] = getTransformedCoords(normals.x[i], normals.y[i], normals.z[i])
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+			tNormals.x[i], tNormals.y[i], tNormals.z[i] = getTransformedCoords(normals.x[i], normals.y[i], normals.z[i])
+		}(i)
 	}
-	var drawnFaces int = len(faces)
+	wg.Wait()
 	for i := range faces {
-		var nIndex = faces[i].vn - 1
-		if backfaceCulling(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex]) {
-			drawnFaces--
-			continue
-		}
-		var brightness int
-		if backedLight {
-			brightness = faceBrightness(normals.x[nIndex], normals.y[nIndex], normals.z[nIndex])
-		} else {
-			brightness = faceBrightness(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex])
-		}
-		var currFace points = points{
-			x: make([]float64, 0, len(faces[i].v)),
-			y: make([]float64, 0, len(faces[i].v)),
-			z: make([]float64, 0, len(faces[i].v)),
-		}
-		for j := range faces[i].v {
-			var index = faces[i].v[j] - 1
-			currFace.x = append(currFace.x, projCoords.x[index])
-			currFace.y = append(currFace.y, projCoords.y[index])
-			currFace.z = append(currFace.z, projCoords.z[index])
-		}
-		var filling = scanlineFilling(currFace)
-		for j := range filling.x {
-			if zBuffer[int(filling.y[j])][int(filling.x[j])] > filling.z[j] {
-				grid[int(filling.y[j])][int(filling.x[j])] = brightness
-				zBuffer[int(filling.y[j])][int(filling.x[j])] = filling.z[j]
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+			var nIndex = faces[i].vn - 1
+			var lWg = sync.WaitGroup{}
+			if cull(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex]) {
+				return
 			}
-		}
+			var brightness int
+			if backedLight {
+				brightness = getShade(normals.x[nIndex], normals.y[nIndex], normals.z[nIndex])
+			} else {
+				brightness = getShade(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex])
+			}
+			var currFace points = points{
+				x: make([]float64, 0, len(faces[i].v)),
+				y: make([]float64, 0, len(faces[i].v)),
+				z: make([]float64, 0, len(faces[i].v)),
+			}
+			for j := range faces[i].v {
+				var index = faces[i].v[j] - 1
+				currFace.x = append(currFace.x, projCoords.x[index])
+				currFace.y = append(currFace.y, projCoords.y[index])
+				currFace.z = append(currFace.z, projCoords.z[index])
+			}
+			var filling = fillFace(currFace)
+			for j := range filling.x {
+				sem <- struct{}{}
+				lWg.Add(1)
+				go func(j int) {
+					defer lWg.Done()
+					defer func() {
+						<-sem
+					}()
+					mut.Lock()
+					if zBuff[int(filling.y[j])][int(filling.x[j])] > filling.z[j] {
+						grid[int(filling.y[j])][int(filling.x[j])] = brightness
+						zBuff[int(filling.y[j])][int(filling.x[j])] = filling.z[j]
+					}
+					mut.Unlock()
+				}(j)
+			}
+			lWg.Wait()
+		}(i)
 	}
+	wg.Wait()
 	for i := range grid {
 		for j := range grid[i] {
 			fmt.Print(" " + string(ascii[grid[i][j]]) + " ")
 		}
 		fmt.Println()
 	}
-	fmt.Printf("Render time: %0.1f ms\tFaces: %d", float64(time.Since(now))/1e6, drawnFaces)
+	fmt.Printf("Render time: %0.1f ms", float64(time.Since(startTime))/1e6)
 }
 
 func main() {
