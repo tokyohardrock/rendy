@@ -9,21 +9,21 @@ import (
 )
 
 const (
-	d          = 2.5 // camera Z-coordinate
-	gridWidth  = 40  // grid width
-	gridHeight = 40  // grid height
+	d          = 2.5 // distance to camera
+	gridWidth  = 40
+	gridHeight = 40
 	fps        = 16
-	delta      = math.Pi * 0.01
+	angleDelta = math.Pi * 0.01
 )
 
 var backedLight = true
 
 var maxGoroutines = 50_000
 
-type points struct {
-	x []float64
-	y []float64
-	z []float64
+type point struct {
+	x float64
+	y float64
+	z float64
 }
 
 type face struct {
@@ -31,16 +31,24 @@ type face struct {
 	vn int
 }
 
-var vrtcs points = points{
-	x: []float64{1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0},
-	y: []float64{-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0},
-	z: []float64{-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0},
+var vertices []point = []point{
+	{x: 1.0, y: -1.0, z: -1.0},
+	{x: 1.0, y: -1.0, z: 1.0},
+	{x: -1.0, y: -1.0, z: 1.0},
+	{x: -1.0, y: -1.0, z: -1.0},
+	{x: 1.0, y: 1.0, z: -1.0},
+	{x: 1.0, y: 1.0, z: 1.0},
+	{x: -1.0, y: 1.0, z: 1.0},
+	{x: -1.0, y: 1.0, z: -1.0},
 }
 
-var normals points = points{
-	x: []float64{0.0, 0.0, 1.0, -1.0, 0.0, 0.0},
-	y: []float64{-1.0, 1.0, 0.0, 0.0, 0.0, 0.0},
-	z: []float64{0.0, 0.0, 0.0, 0.0, 1.0, -1.0},
+var normals []point = []point{
+	{x: 0.0, y: -1.0, z: 0.0},
+	{x: 0.0, y: 1.0, z: 0.0},
+	{x: 1.0, y: 0.0, z: 0.0},
+	{x: -1.0, y: 0.0, z: 0.0},
+	{x: 0.0, y: 0.0, z: 1.0},
+	{x: 0.0, y: 0.0, z: -1.0},
 }
 
 var faces []face = []face{
@@ -71,143 +79,131 @@ var cameraDir = []float64{0, 0, -1}
 
 var ascii = []byte{' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'}
 
-func normalizeAndCenter(vrt *points) {
-	if len(vrt.x) == 0 || len(vrt.y) == 0 || len(vrt.z) == 0 {
+func normalizeAndCenter(vrts *[]point) {
+	var vrtLen = len(*vrts)
+	if vrtLen == 0 {
 		log.Fatal("Empty vertices — nothing to normalize")
 	}
 	var maxElem float64
 	var cx, cy, cz float64
-	for i := range vrt.x {
-		val := math.Max(math.Abs(vrt.x[i]), math.Max(math.Abs(vrt.y[i]), math.Abs(vrt.z[i])))
+	for i := range *vrts {
+		var val = math.Max(math.Abs((*vrts)[i].x), math.Max(math.Abs((*vrts)[i].y), math.Abs((*vrts)[i].z)))
 		maxElem = math.Max(maxElem, val)
-		cx += vrt.x[i]
-		cy += vrt.y[i]
-		cz += vrt.z[i]
+		cx += (*vrts)[i].x
+		cy += (*vrts)[i].y
+		cz += (*vrts)[i].z
 	}
 	if maxElem == 0 {
 		log.Fatal("Singularity detected — normalization aborted")
 	}
-	cx /= float64(len(vrt.x))
-	cy /= float64(len(vrt.y))
-	cz /= float64(len(vrt.z))
+	cx /= float64(vrtLen)
+	cy /= float64(vrtLen)
+	cz /= float64(vrtLen)
 	var scale = 1 / maxElem
-	for i := range vrt.x {
-		vrt.x[i] = (vrt.x[i] - cx) * scale
-		vrt.y[i] = (vrt.y[i] - cy) * scale
-		vrt.z[i] = (vrt.z[i] - cz) * scale
+	for i := range *vrts {
+		(*vrts)[i].x = ((*vrts)[i].x - cx) * scale
+		(*vrts)[i].y = ((*vrts)[i].y - cy) * scale
+		(*vrts)[i].z = ((*vrts)[i].z - cz) * scale
 	}
 }
 
-func getTransformedCoords(x, y, z float64) (float64, float64, float64) {
+func getTransformedCoords(vrtx point) point {
 	var vertexMatrix = [][]float64{
-		{x},
-		{y},
-		{z},
+		{vrtx.x},
+		{vrtx.y},
+		{vrtx.z},
 	}
 	var xRot = xRotationMatrix(xyzRotations[0])
 	var yRot = yRotationMatrix(xyzRotations[1])
 	var zRot = zRotationMatrix(xyzRotations[2])
 	var transformMatrix = mulitplyMatrices(mulitplyMatrices(xRot, yRot), zRot)
 	var result = mulitplyMatrices(transformMatrix, vertexMatrix)
-	return result[0][0], result[1][0], result[2][0]
+	return point{x: result[0][0], y: result[1][0], z: result[2][0]}
 }
 
-func getScreenCoord(x, y, z float64) (float64, float64) {
-	var x_proj = x / (z + d)
-	var y_proj = y / (z + d)
+func getScreenCoord(vrtx point) point {
+	var x_proj = vrtx.x / (vrtx.z + d)
+	var y_proj = vrtx.y / (vrtx.z + d)
 	var scrnX = (x_proj + 1) * (gridWidth - 1) * 0.5
 	var scrnY = (1 - y_proj) * (gridHeight - 1) * 0.5
-	return scrnX, scrnY
+	return point{x: scrnX, y: scrnY}
 }
 
-func findDepth(coords points, vrtX, vrtY, det float64) float64 {
-	var l1 = ((coords.y[1]-coords.y[2])*(vrtX-coords.x[2]) + (coords.x[2]-coords.x[1])*(vrtY-coords.y[2])) / det
-	var l2 = ((coords.y[2]-coords.y[0])*(vrtX-coords.x[2]) + (coords.x[0]-coords.x[2])*(vrtY-coords.y[2])) / det
+func findDepth(coords []point, vrtX, vrtY, det float64) float64 {
+	var l1 = ((coords[1].y-coords[2].y)*(vrtX-coords[2].x) + (coords[2].x-coords[1].x)*(vrtY-coords[2].y)) / det
+	var l2 = ((coords[2].y-coords[0].y)*(vrtX-coords[2].x) + (coords[0].x-coords[2].x)*(vrtY-coords[2].y)) / det
 	var l3 = 1 - l1 - l2
-	var inv = l1/(coords.z[0]) + l2/(coords.z[1]) + l3/(coords.z[2])
+	var inv = l1/(coords[0].z) + l2/(coords[1].z) + l3/(coords[2].z)
 	return 1 / inv
 }
 
-func fillFace(coords points) points {
-	if len(coords.x) < 3 {
+func fillFace(coords []point) []point {
+	if len(coords) < 3 {
 		log.Println("Invalid face - must be at least 3 vertices")
-		return points{}
+		return []point{}
 	}
-	var filling points = points{
-		x: make([]float64, 0, 5),
-		y: make([]float64, 0, 5),
-		z: make([]float64, 0, 5),
+	var filling []point = make([]point, 0, 5)
+	if coords[0].y > coords[1].y {
+		coords[0], coords[1] = coords[1], coords[0]
 	}
-	var swap = func(i1, i2 int) {
-		coords.x[i1], coords.x[i2] = coords.x[i2], coords.x[i1]
-		coords.y[i1], coords.y[i2] = coords.y[i2], coords.y[i1]
-		coords.z[i1], coords.z[i2] = coords.z[i2], coords.z[i1]
+	if coords[1].y > coords[2].y {
+		coords[1], coords[2] = coords[2], coords[1]
 	}
-	if coords.y[0] > coords.y[1] {
-		swap(0, 1)
+	if coords[0].y > coords[1].y {
+		coords[0], coords[1] = coords[1], coords[0]
 	}
-	if coords.y[1] > coords.y[2] {
-		swap(1, 2)
-	}
-	if coords.y[0] > coords.y[1] {
-		swap(0, 1)
-	}
-	var det = (coords.y[1]-coords.y[2])*(coords.x[0]-coords.x[2]) + (coords.x[2]-coords.x[1])*(coords.y[0]-coords.y[2])
-	var startY = int(math.Max(0, math.Ceil(coords.y[0])))
-	var midY = int(math.Min(gridHeight-1, math.Ceil(coords.y[1])))
-	var endY = int(math.Min(gridHeight-1, math.Ceil(coords.y[2])))
+	var det = (coords[1].y-coords[2].y)*(coords[0].x-coords[2].x) + (coords[2].x-coords[1].x)*(coords[0].y-coords[2].y)
+	var startY = int(math.Max(0, math.Ceil(coords[0].y)))
+	var midY = int(math.Min(gridHeight-1, math.Ceil(coords[1].y)))
+	var endY = int(math.Min(gridHeight-1, math.Ceil(coords[2].y)))
 	for y := startY; y < midY; y++ {
-		var lim1 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[1]-coords.x[0])/(coords.y[1]-coords.y[0])
-		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
+		var lim1 = coords[0].x + (float64(y)-coords[0].y)*(coords[1].x-coords[0].x)/(coords[1].y-coords[0].y)
+		var lim2 = coords[0].x + (float64(y)-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
 		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
-			filling.x = append(filling.x, float64(x))
-			filling.y = append(filling.y, float64(y))
-			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), det))
+			filling = append(filling, point{
+				x: float64(x),
+				y: float64(y),
+				z: findDepth(coords, float64(x), float64(y), det),
+			})
 		}
 	}
 	for y := midY; y < endY; y++ {
-		var lim1 = coords.x[1] + (float64(y)-coords.y[1])*(coords.x[2]-coords.x[1])/(coords.y[2]-coords.y[1])
-		var lim2 = coords.x[0] + (float64(y)-coords.y[0])*(coords.x[2]-coords.x[0])/(coords.y[2]-coords.y[0])
+		var lim1 = coords[1].x + (float64(y)-coords[1].y)*(coords[2].x-coords[1].x)/(coords[2].y-coords[1].y)
+		var lim2 = coords[0].x + (float64(y)-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
 		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
-			filling.x = append(filling.x, float64(x))
-			filling.y = append(filling.y, float64(y))
-			filling.z = append(filling.z, findDepth(coords, float64(x), float64(y), det))
+			filling = append(filling, point{
+				x: float64(x),
+				y: float64(y),
+				z: findDepth(coords, float64(x), float64(y), det),
+			})
 		}
 	}
 	return filling
 }
 
-func cull(x, y, z float64) bool {
-	return (cameraDir[0]*x + cameraDir[1]*y + cameraDir[2]*z) <= 0
+func cull(normal point) bool {
+	return (cameraDir[0]*normal.x + cameraDir[1]*normal.y + cameraDir[2]*normal.z) <= 0
 }
 
-func getShade(x, y, z float64) int {
-	var brightness = x*light[0] + y*light[1] + z*light[2]
+func getShade(normal point) int {
+	var brightness = normal.x*light[0] + normal.y*light[1] + normal.z*light[2]
 	brightness = ((brightness + 3) / 6) * float64(len(ascii))
-	return int(brightness) + 2
+	return int(brightness)
 }
 
 func draw() {
 	var startTime = time.Now()
 	var grid = make([][]int, gridHeight)
 	var zBuff = make([][]float64, gridHeight)
+	var projCoords = make([]point, len(vertices))
+	var tNormals = make([]point, len(normals))
 	var wg = sync.WaitGroup{}
 	var mut = sync.Mutex{}
 	var sem = make(chan struct{}, maxGoroutines)
-	var projCoords = points{
-		x: make([]float64, len(vrtcs.x)),
-		y: make([]float64, len(vrtcs.y)),
-		z: make([]float64, len(vrtcs.z)),
-	}
-	var tNormals = points{
-		x: make([]float64, len(normals.x)),
-		y: make([]float64, len(normals.y)),
-		z: make([]float64, len(normals.z)),
-	}
 	for i := range grid {
 		grid[i] = make([]int, gridWidth)
 		zBuff[i] = make([]float64, gridWidth)
@@ -215,7 +211,7 @@ func draw() {
 			zBuff[i][j] = math.Inf(1)
 		}
 	}
-	for i := range vrtcs.x {
+	for i := range vertices {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int) {
@@ -223,15 +219,13 @@ func draw() {
 			defer func() {
 				<-sem
 			}()
-			var tX, tY, tZ = getTransformedCoords(vrtcs.x[i], vrtcs.y[i], vrtcs.z[i])
-			var scrnX, scrnY = getScreenCoord(tX, tY, tZ)
-			projCoords.x[i] = scrnX
-			projCoords.y[i] = scrnY
-			projCoords.z[i] = tZ + d
+			var tPoint = getTransformedCoords(vertices[i])
+			projCoords[i] = getScreenCoord(tPoint)
+			projCoords[i].z = tPoint.z + d
 		}(i)
 	}
 	wg.Wait()
-	for i := range normals.x {
+	for i := range normals {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int) {
@@ -239,7 +233,7 @@ func draw() {
 			defer func() {
 				<-sem
 			}()
-			tNormals.x[i], tNormals.y[i], tNormals.z[i] = getTransformedCoords(normals.x[i], normals.y[i], normals.z[i])
+			tNormals[i] = getTransformedCoords(normals[i])
 		}(i)
 	}
 	wg.Wait()
@@ -253,28 +247,22 @@ func draw() {
 			}()
 			var nIndex = faces[i].vn - 1
 			var lWg = sync.WaitGroup{}
-			if cull(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex]) {
+			if cull(tNormals[nIndex]) {
 				return
 			}
 			var brightness int
 			if backedLight {
-				brightness = getShade(normals.x[nIndex], normals.y[nIndex], normals.z[nIndex])
+				brightness = getShade(normals[nIndex])
 			} else {
-				brightness = getShade(tNormals.x[nIndex], tNormals.y[nIndex], tNormals.z[nIndex])
+				brightness = getShade(tNormals[nIndex])
 			}
-			var currFace points = points{
-				x: make([]float64, 0, len(faces[i].v)),
-				y: make([]float64, 0, len(faces[i].v)),
-				z: make([]float64, 0, len(faces[i].v)),
-			}
+			var currFace []point = make([]point, 0, len(faces[i].v))
 			for j := range faces[i].v {
 				var index = faces[i].v[j] - 1
-				currFace.x = append(currFace.x, projCoords.x[index])
-				currFace.y = append(currFace.y, projCoords.y[index])
-				currFace.z = append(currFace.z, projCoords.z[index])
+				currFace = append(currFace, projCoords[index])
 			}
 			var filling = fillFace(currFace)
-			for j := range filling.x {
+			for j := range filling {
 				sem <- struct{}{}
 				lWg.Add(1)
 				go func(j int) {
@@ -283,9 +271,9 @@ func draw() {
 						<-sem
 					}()
 					mut.Lock()
-					if zBuff[int(filling.y[j])][int(filling.x[j])] > filling.z[j] {
-						grid[int(filling.y[j])][int(filling.x[j])] = brightness
-						zBuff[int(filling.y[j])][int(filling.x[j])] = filling.z[j]
+					if zBuff[int(filling[j].y)][int(filling[j].x)] > filling[j].z {
+						grid[int(filling[j].y)][int(filling[j].x)] = brightness
+						zBuff[int(filling[j].y)][int(filling[j].x)] = filling[j].z
 					}
 					mut.Unlock()
 				}(j)
@@ -304,12 +292,12 @@ func draw() {
 }
 
 func main() {
-	normalizeAndCenter(&vrtcs)
+	normalizeAndCenter(&vertices)
 	for {
 		time.Sleep(time.Second / fps)
-		ClearScreen()
+		clearScreen()
 		for i := range xyzRotations {
-			xyzRotations[i] = math.Mod(xyzRotations[i], math.Pi*2) + delta
+			xyzRotations[i] = math.Mod(xyzRotations[i], math.Pi*2) + angleDelta
 		}
 		draw()
 	}
