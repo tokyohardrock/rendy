@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	d          = 2.5 // distance to camera
-	gridWidth  = 40
-	gridHeight = 40
+	d          = 1.5 // distance to camera
+	gridWidth  = 100
+	gridHeight = 100
 	fps        = 16
 	angleDelta = math.Pi * 0.01
 )
@@ -19,6 +19,10 @@ const (
 var backedLight = true
 
 var maxGoroutines = 50_000
+
+var wg = sync.WaitGroup{}
+var mut = sync.Mutex{}
+var sem = make(chan struct{}, maxGoroutines)
 
 type point struct {
 	x float64
@@ -28,83 +32,75 @@ type point struct {
 
 type face struct {
 	v  []int
-	vn int
+	vn point
 }
 
-var vertices []point = []point{
-	{x: 1.0, y: -1.0, z: -1.0},
-	{x: 1.0, y: -1.0, z: 1.0},
-	{x: -1.0, y: -1.0, z: 1.0},
-	{x: -1.0, y: -1.0, z: -1.0},
-	{x: 1.0, y: 1.0, z: -1.0},
-	{x: 1.0, y: 1.0, z: 1.0},
-	{x: -1.0, y: 1.0, z: 1.0},
-	{x: -1.0, y: 1.0, z: -1.0},
-}
-
-var normals []point = []point{
-	{x: 0.0, y: -1.0, z: 0.0},
-	{x: 0.0, y: 1.0, z: 0.0},
-	{x: 1.0, y: 0.0, z: 0.0},
-	{x: -1.0, y: 0.0, z: 0.0},
-	{x: 0.0, y: 0.0, z: 1.0},
-	{x: 0.0, y: 0.0, z: -1.0},
-}
-
-var faces []face = []face{
-	{v: []int{1, 2, 3}, vn: 1},
-	{v: []int{1, 3, 4}, vn: 1},
-
-	{v: []int{5, 7, 6}, vn: 2},
-	{v: []int{5, 8, 7}, vn: 2},
-
-	{v: []int{1, 5, 6}, vn: 3},
-	{v: []int{1, 6, 2}, vn: 3},
-
-	{v: []int{4, 7, 8}, vn: 4},
-	{v: []int{4, 3, 7}, vn: 4},
-
-	{v: []int{2, 6, 7}, vn: 5},
-	{v: []int{2, 7, 3}, vn: 5},
-
-	{v: []int{1, 8, 5}, vn: 6},
-	{v: []int{1, 4, 8}, vn: 6},
-}
+var vertices = make([]point, 0, 1000)
+var faces = make([]face, 0, 1000)
 
 var xyzRotations = []float64{0, 0, 0}
-
-var light = []float64{0, 0, 1}
-
-var cameraDir = []float64{0, 0, -1}
+var light = point{x: 0, y: 0, z: 1}
+var cameraDir = point{x: 0, y: 0, z: -1}
 
 var ascii = []byte{' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'}
 
 func normalizeAndCenter(vrts *[]point) {
-	var vrtLen = len(*vrts)
+	var vrtLen = float64(len(*vrts))
 	if vrtLen == 0 {
 		log.Fatal("Empty vertices — nothing to normalize")
 	}
 	var maxElem float64
-	var cx, cy, cz float64
+	var cX, cY, cZ float64
 	for i := range *vrts {
 		var val = math.Max(math.Abs((*vrts)[i].x), math.Max(math.Abs((*vrts)[i].y), math.Abs((*vrts)[i].z)))
 		maxElem = math.Max(maxElem, val)
-		cx += (*vrts)[i].x
-		cy += (*vrts)[i].y
-		cz += (*vrts)[i].z
+		cX += (*vrts)[i].x
+		cY += (*vrts)[i].y
+		cZ += (*vrts)[i].z
 	}
 	if maxElem == 0 {
-		log.Fatal("Singularity detected — normalization aborted")
+		log.Fatal("Vertices collapsed to a point — normalization aborted")
 	}
-	cx /= float64(vrtLen)
-	cy /= float64(vrtLen)
-	cz /= float64(vrtLen)
+	cX /= vrtLen
+	cY /= vrtLen
+	cZ /= vrtLen
 	var scale = 1 / maxElem
 	for i := range *vrts {
-		(*vrts)[i].x = ((*vrts)[i].x - cx) * scale
-		(*vrts)[i].y = ((*vrts)[i].y - cy) * scale
-		(*vrts)[i].z = ((*vrts)[i].z - cz) * scale
+		(*vrts)[i].x = ((*vrts)[i].x - cX) * scale
+		(*vrts)[i].y = ((*vrts)[i].y - cY) * scale
+		(*vrts)[i].z = ((*vrts)[i].z - cZ) * scale
 	}
+}
+
+func dot(vec1 point, vec2 point) float64 {
+	return vec1.x*vec2.x + vec1.y*vec2.y + vec1.z*vec2.z
+}
+
+func normalizeVec(vec point) point {
+	var len = math.Sqrt(vec.x*vec.x + vec.y*vec.y + vec.z*vec.z)
+	return point{vec.x / len, vec.y / len, vec.z / len}
+}
+
+func computeFaceNormal(index int) point {
+	var vrt1 = faces[index].v[0] - 1
+	var vrt2 = faces[index].v[1] - 1
+	var vrt3 = faces[index].v[2] - 1
+	var v0 = point{
+		x: vertices[vrt1].x - vertices[vrt3].x,
+		y: vertices[vrt1].y - vertices[vrt3].y,
+		z: vertices[vrt1].z - vertices[vrt3].z,
+	}
+	var v1 = point{
+		x: vertices[vrt2].x - vertices[vrt3].x,
+		y: vertices[vrt2].y - vertices[vrt3].y,
+		z: vertices[vrt2].z - vertices[vrt3].z,
+	}
+	var rawNormal = point{
+		x: v0.y*v1.z - v0.z*v1.y,
+		y: v0.z*v1.x - v0.x*v1.z,
+		z: v0.x*v1.y - v0.y*v1.x,
+	}
+	return normalizeVec(rawNormal)
 }
 
 func getTransformedCoords(vrtx point) point {
@@ -157,40 +153,40 @@ func fillFace(coords []point) []point {
 	var midY = int(math.Min(gridHeight-1, math.Ceil(coords[1].y)))
 	var endY = int(math.Min(gridHeight-1, math.Ceil(coords[2].y)))
 	for y := startY; y < midY; y++ {
-		var lim1 = coords[0].x + (float64(y)-coords[0].y)*(coords[1].x-coords[0].x)/(coords[1].y-coords[0].y)
-		var lim2 = coords[0].x + (float64(y)-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
+		var fY = float64(y)
+		var lim1 = coords[0].x + (fY-coords[0].y)*(coords[1].x-coords[0].x)/(coords[1].y-coords[0].y)
+		var lim2 = coords[0].x + (fY-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
 		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
+			var fX = float64(x)
 			filling = append(filling, point{
-				x: float64(x),
-				y: float64(y),
-				z: findDepth(coords, float64(x), float64(y), det),
+				x: fX,
+				y: fY,
+				z: findDepth(coords, fX, fY, det),
 			})
 		}
 	}
 	for y := midY; y < endY; y++ {
-		var lim1 = coords[1].x + (float64(y)-coords[1].y)*(coords[2].x-coords[1].x)/(coords[2].y-coords[1].y)
-		var lim2 = coords[0].x + (float64(y)-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
+		var fY = float64(y)
+		var lim1 = coords[1].x + (fY-coords[1].y)*(coords[2].x-coords[1].x)/(coords[2].y-coords[1].y)
+		var lim2 = coords[0].x + (fY-coords[0].y)*(coords[2].x-coords[0].x)/(coords[2].y-coords[0].y)
 		var startX = int(math.Max(0, math.Ceil(min(lim1, lim2))))
 		var endX = int(math.Min(float64(gridWidth-1), math.Floor(max(lim1, lim2))))
 		for x := startX; x <= endX; x++ {
+			var fX = float64(x)
 			filling = append(filling, point{
-				x: float64(x),
-				y: float64(y),
-				z: findDepth(coords, float64(x), float64(y), det),
+				x: fX,
+				y: fY,
+				z: findDepth(coords, fX, fY, det),
 			})
 		}
 	}
 	return filling
 }
 
-func cull(normal point) bool {
-	return (cameraDir[0]*normal.x + cameraDir[1]*normal.y + cameraDir[2]*normal.z) <= 0
-}
-
 func getShade(normal point) int {
-	var brightness = normal.x*light[0] + normal.y*light[1] + normal.z*light[2]
+	var brightness = dot(normal, light)
 	brightness = ((brightness + 3) / 6) * float64(len(ascii))
 	return int(brightness)
 }
@@ -200,10 +196,6 @@ func draw() {
 	var grid = make([][]int, gridHeight)
 	var zBuff = make([][]float64, gridHeight)
 	var projCoords = make([]point, len(vertices))
-	var tNormals = make([]point, len(normals))
-	var wg = sync.WaitGroup{}
-	var mut = sync.Mutex{}
-	var sem = make(chan struct{}, maxGoroutines)
 	for i := range grid {
 		grid[i] = make([]int, gridWidth)
 		zBuff[i] = make([]float64, gridWidth)
@@ -225,18 +217,6 @@ func draw() {
 		}(i)
 	}
 	wg.Wait()
-	for i := range normals {
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			defer func() {
-				<-sem
-			}()
-			tNormals[i] = getTransformedCoords(normals[i])
-		}(i)
-	}
-	wg.Wait()
 	for i := range faces {
 		sem <- struct{}{}
 		wg.Add(1)
@@ -245,16 +225,16 @@ func draw() {
 			defer func() {
 				<-sem
 			}()
-			var nIndex = faces[i].vn - 1
 			var lWg = sync.WaitGroup{}
-			if cull(tNormals[nIndex]) {
+			var tNormal = getTransformedCoords(faces[i].vn)
+			if dot(tNormal, cameraDir) <= 0 {
 				return
 			}
 			var brightness int
 			if backedLight {
-				brightness = getShade(normals[nIndex])
+				brightness = getShade(faces[i].vn)
 			} else {
-				brightness = getShade(tNormals[nIndex])
+				brightness = getShade(tNormal)
 			}
 			var currFace []point = make([]point, 0, len(faces[i].v))
 			for j := range faces[i].v {
@@ -292,7 +272,21 @@ func draw() {
 }
 
 func main() {
+	var path = "models/teapot.obj"
+	parseFile(path)
 	normalizeAndCenter(&vertices)
+	for i := range faces {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() {
+				<-sem
+			}()
+			faces[i].vn = computeFaceNormal(i)
+		}(i)
+	}
+	wg.Wait()
 	for {
 		time.Sleep(time.Second / fps)
 		clearScreen()
